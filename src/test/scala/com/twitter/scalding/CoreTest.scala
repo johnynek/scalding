@@ -5,6 +5,34 @@ import cascading.tuple.TupleEntry
 
 import org.specs._
 
+class NumberJoinerJob(args : Args) extends Job(args) {
+  val in0 = Tsv("input0").read.mapTo((0,1) -> ('x0, 'y0)) { input : (Int, Int) => input }
+  val in1 = Tsv("input1").read.mapTo((0,1) -> ('x1, 'y1)) { input : (Long, Long) => input }
+  in0.joinWithSmaller('x0 -> 'x1, in1)
+  .write(Tsv("output"))
+}
+
+class NumberJoinTest extends Specification with TupleConversions {
+  "A NumberJoinerJob" should {
+    //Set up the job:
+    "not throw when joining longs with ints" in {
+      JobTest("com.twitter.scalding.NumberJoinerJob")
+        .source(Tsv("input0"), List(("0","1"), ("1","2"), ("2","4")))
+        .source(Tsv("input1"), List(("0","1"), ("1","3"), ("2","9")))
+        .sink[(Int,Int,Long,Long)](Tsv("output")) { outBuf =>
+          val unordered = outBuf.toSet
+          unordered.size must be_==(3)
+          unordered((0,1,0L,1L)) must be_==(true)
+          unordered((1,2,1L,3L)) must be_==(true)
+          unordered((2,4,2L,9L)) must be_==(true)
+        }
+        .run
+        .runHadoop
+        .finish
+    }
+  }
+}
+
 class MapToGroupBySizeSumMaxJob(args: Args) extends Job(args) {
   TextLine(args("input")).read.
   //1 is the line
@@ -49,7 +77,8 @@ class MapToGroupBySizeSumMaxTest extends Specification with TupleConversions {
           goldenOutput must be_==(actualOutput)
         }
       }.
-      run
+      run.
+      finish
   }
 }
 
@@ -87,8 +116,86 @@ class JoinTest extends Specification with TupleConversions {
         }
       }
       .run
+      .finish
   }
 }
+
+class TinyJoinJob(args: Args) extends Job(args) {
+  val p1 = Tsv(args("input1"))
+    .read
+    .mapTo((0, 1) -> ('k1, 'v1)) { v : (String, Int) => v }
+  val p2 = Tsv(args("input2"))
+    .read
+    .mapTo((0, 1) -> ('k2, 'v2)) { v : (String, Int) => v }
+  p1.joinWithTiny('k1 -> 'k2, p2)
+    .project('k1, 'v1, 'v2)
+    .write( Tsv(args("output")) )
+}
+
+class TinyJoinTest extends Specification with TupleConversions {
+  noDetailedDiffs() //Fixes an issue with scala 2.9
+  "A JoinJob" should {
+    val input1 = List("a" -> 1, "b" -> 2, "c" -> 3)
+    val input2 = List("b" -> -1, "c" -> 5, "d" -> 4)
+    val correctOutput = Map("b" -> (2, -1), "c" -> (3, 5))
+
+    JobTest("com.twitter.scalding.JoinJob")
+      .arg("input1", "fakeInput1")
+      .arg("input2", "fakeInput2")
+      .arg("output", "fakeOutput")
+      .source(Tsv("fakeInput1"), input1)
+      .source(Tsv("fakeInput2"), input2)
+      .sink[(String,Int,Int)](Tsv("fakeOutput")) { outBuf =>
+        val actualOutput = outBuf.map {
+          case (k : String, v1 : Int, v2 : Int) =>
+          (k,(v1, v2))
+        }.toMap
+        "join tuples with the same key" in {
+          correctOutput must be_==(actualOutput)
+        }
+      }
+      .run
+      .runHadoop
+      .finish
+  }
+}
+
+class TinyThenSmallJoin(args : Args) extends Job(args) {
+  val pipe0 = Tsv("in0",('x0,'y0)).read
+  val pipe1 = Tsv("in1",('x1,'y1)).read
+  val pipe2 = Tsv("in2",('x2,'y2)).read
+
+  pipe0.joinWithTiny('x0 -> 'x1, pipe1)
+    .joinWithSmaller('x0 -> 'x2, pipe2)
+    .write(Tsv("out"))
+}
+
+class TinyThenSmallJoinTest extends Specification with TupleConversions with FieldConversions {
+  noDetailedDiffs() //Fixes an issue with scala 2.9
+  "A TinyThenSmallJoin" should {
+    val input0 = List((1,2),(2,3),(3,4))
+    val input1 = List((1,20),(2,30),(3,40))
+    val input2 = List((1,200),(2,300),(3,400))
+    val correct = List((1,2,1,20,1,200),
+      (2,3,2,30,2,300),(3,4,3,40,3,400))
+
+    JobTest("com.twitter.scalding.TinyThenSmallJoin")
+      .source(Tsv("in0",('x0,'y0)), input0)
+      .source(Tsv("in1",('x1,'y1)), input1)
+      .source(Tsv("in2",('x2,'y2)), input2)
+      .sink[(Int,Int,Int,Int,Int,Int)](Tsv("out")) { outBuf =>
+        val actualOutput = outBuf.toList.sorted
+        println(actualOutput)
+        "join tuples with the same key" in {
+          correct must be_==(actualOutput)
+        }
+      }
+      .run
+      .runHadoop
+      .finish
+  }
+}
+
 
 class MergeTestJob(args : Args) extends Job(args) {
   val in = TextLine(args("in")).read.mapTo(1->('x,'y)) { line : String =>
@@ -125,7 +232,8 @@ class MergeTest extends Specification with TupleConversions {
           golden must be_==(outBuf.toMap)
         }
       }.
-      run
+      run.
+      finish
   }
 }
 
@@ -138,8 +246,9 @@ class SizeAveStdJob(args : Args) extends Job(args) {
     _.sizeAveStdev('y->('size,'yave,'ystdev))
     //Make sure this doesn't ruin the calculation
     .sizeAveStdev('y->('size2,'yave2,'ystdev2))
+    .average('y)
   }
-  .project('x,'size,'yave,'ystdev)
+  .project('x,'size,'yave,'ystdev,'y)
   .write(Tsv(args("output")))
 }
 
@@ -147,8 +256,12 @@ class SizeAveStdSpec extends Specification with TupleConversions {
   "A sizeAveStd job" should {
     "correctly compute aves and standard deviations" in {
       val r = new java.util.Random
+      def powerLawRand = {
+        // Generates a 1/x powerlaw with a max value or 1e40
+        scala.math.pow(1e40, r.nextDouble)
+      }
       //Here is our input data:
-      val input = (0 to 100).map { i => (i.toString, r.nextDouble.toString +" "+ r.nextDouble.toString) }
+      val input = (0 to 10000).map { i => (i.toString, r.nextDouble.toString +" "+ powerLawRand.toString) }
       val output = input.map { numline => numline._2.split(" ").map { _.toDouble } }
         .map { vec => ((vec(0)*4).toInt, vec(1)) }
         .groupBy { tup => tup._1 }
@@ -165,20 +278,23 @@ class SizeAveStdSpec extends Specification with TupleConversions {
         arg("input","fakeInput").
         arg("output","fakeOutput").
         source(TextLine("fakeInput"), input).
-        sink[(Int,Long,Double,Double)](Tsv("fakeOutput")) { outBuf =>
+        sink[(Int,Long,Double,Double,Double)](Tsv("fakeOutput")) { outBuf =>
           "correctly compute size, ave, stdev" in {
             outBuf.foreach { computed =>
               val correctTup = output(computed._1)
               //Size
               computed._2 must be_== (correctTup._1)
               //Ave
-              computed._3 must beCloseTo(correctTup._2, 1e-6)
+              computed._3/correctTup._2 must beCloseTo(1.0, 1e-6)
               //Stdev
-              computed._4 must beCloseTo(correctTup._3, 1e-6)
+              computed._4/correctTup._3 must beCloseTo(1.0, 1e-6)
+              //Explicitly calculated Average:
+              computed._5/computed._3 must beCloseTo(1.0, 1e-6)
             }
           }
         }.
-        run
+        run.
+        finish
     }
   }
 }
@@ -215,7 +331,8 @@ class DoubleGroupSpec extends Specification with TupleConversions {
             outM(3) must be_== (1)
           }
         }.
-        run
+        run.
+        finish
     }
   }
 }
@@ -249,7 +366,8 @@ class GroupUniqueSpec extends Specification with TupleConversions {
           outSet.size must_== 3
         }
       }.
-      run
+      run.
+      finish
   }
 }
 
@@ -277,6 +395,7 @@ class DiscardTest extends Specification with TupleConversions {
         }
       }
       .run
+      .finish
   }
 }
 
@@ -300,7 +419,9 @@ class HistogramTest extends Specification with TupleConversions {
         "must get the result right" in {
           outBuf(0) must_== (2L,1L)
         }
-      }.run
+      }
+      .run
+      .finish
   }
 }
 
@@ -310,6 +431,13 @@ class ToListJob(args : Args) extends Job(args) {
     .groupBy('num){ _.toList[String]('words -> 'wordList) }
     .map('wordList -> 'wordList){w : List[String] => w.mkString(" ")}
     .project('num, 'wordList)
+    .write(Tsv(args("out")))
+}
+
+class NullListJob(args : Args) extends Job(args) {
+  TextLine(args("in")).read
+    .groupBy('num){ _.toList[String]('line -> 'lineList) }
+    .map('lineList -> 'lineList) { ll : List[String] => ll.mkString(" ") }
     .write(Tsv(args("out")))
 }
 
@@ -328,7 +456,27 @@ class ToListTest extends Specification with TupleConversions {
           outBuf(0)._2.split(" ").toSet must_== Set("single", "test")
           outBuf(1)._2.split(" ").toSet must_== Set("single", "result")
         }
-      }.run
+      }
+      .run
+      .finish
+  }
+
+  "A NullListJob" should {
+    JobTest("com.twitter.scalding.NullListJob")
+      .arg("in","fakeIn")
+      .arg("out","fakeOut")
+      .source(TextLine("fakeIn"), List("0" -> null, "0" -> "a", "0" -> null, "0" -> "b"))
+      .sink[(Int,String)](Tsv("fakeOut")) { outBuf =>
+        "must have the right number of lines" in {
+          outBuf.size must_== 1
+        }
+        "must return an empty list for null key" in {
+          val sSet = outBuf(0)._2.split(" ").toSet
+          sSet must_== Set("a", "b")
+        }
+      }
+      .run
+      .finish
   }
 }
 
@@ -357,6 +505,8 @@ class CrossTest extends Specification with TupleConversions {
         }
       }
       .run
+      .runHadoop
+      .finish
   }
 }
 
@@ -381,5 +531,36 @@ class TopKTest extends Specification with TupleConversions {
         }
       }
       .run
+      .finish
+  }
+}
+
+class TakeJob(args : Args) extends Job(args) {
+  val input = Tsv("in").read
+    .mapTo((0,1,2) -> ('x,'y,'z)) { tup : (Int,Int,Int) => tup }
+
+  input.groupBy('x) { _.take(2) }.write(Tsv("out2"))
+  input.groupAll.write(Tsv("outall"))
+}
+
+class TakeTest extends Specification with TupleConversions {
+  noDetailedDiffs()
+  "A TakeJob" should {
+    JobTest("com.twitter.scalding.TakeJob")
+      .source(Tsv("in"), List((3,0,1),(3,1,10),(3,5,100)) )
+      .sink[(Int,Int,Int)](Tsv("outall")) { outBuf => ()
+        "groupAll must see everything in same order" in {
+          outBuf.size must_==3
+          outBuf.toList must be_== (List((3,0,1),(3,1,10),(3,5,100)))
+        }
+      }
+      .sink[(Int,Int,Int)](Tsv("out2")) { outBuf =>
+        "take(2) must only get 2" in {
+          outBuf.size must_==2
+          outBuf.toList must be_== (List((3,0,1),(3,1,10)))
+        }
+      }
+      .run
+      .finish
   }
 }

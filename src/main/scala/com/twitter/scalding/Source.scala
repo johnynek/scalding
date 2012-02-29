@@ -15,6 +15,9 @@ limitations under the License.
 */
 package com.twitter.scalding
 
+import com.twitter.meatlocker.tap.MemorySourceTap
+
+import java.io.File
 import java.util.TimeZone
 import java.util.Calendar
 import java.util.{Map => JMap}
@@ -31,16 +34,21 @@ import cascading.tap.MultiSourceTap
 import cascading.tap.SinkMode
 import cascading.tap.Tap
 import cascading.tap.local.FileTap
-
+import cascading.tuple.{Tuple, TupleEntryIterator, Fields}
 
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapred.OutputCollector;
 import org.apache.hadoop.mapred.RecordReader;
 
-import org.apache.hadoop.fs.Path
-import cascading.tuple.{Tuple, TupleEntryIterator, Fields}
 import collection.mutable.{Buffer, MutableList}
+import scala.collection.JavaConverters._
+
+/**
+ * thrown when validateTaps fails
+ */
+class InvalidSourceException(message : String) extends RuntimeException(message)
 
 /**
 * Every source must have a correct toString method.  If you use
@@ -106,46 +114,121 @@ abstract class Source extends java.io.Serializable {
     }
   }
 
-  private def pathIsGood(p : String, conf : Configuration) = {
+  protected def pathIsGood(p : String, conf : Configuration) = {
     val path = new Path(p)
     Option(path.getFileSystem(conf).globStatus(path)).
         map(_.length > 0).
         getOrElse(false)
   }
 
-  protected def readWriteMode(rwmode : AccessMode) : SinkMode = {
-    rwmode match {
-      case Read() => SinkMode.KEEP
-      case Write() => SinkMode.REPLACE
-    }
-  }
-
   def hdfsPaths : Iterable[String]
+  // By default, we write to the LAST path returned by hdfsPaths
+  def hdfsWritePath = hdfsPaths.last
   def localPath : String
   def localScheme : LocalScheme
   def hdfsScheme : Scheme[_ <: FlowProcess[_],_,_,_,_,_]
 
-  protected def createTap(m : AccessMode, mode : Mode) : RawTap = {
+  protected def createTap(readOrWrite : AccessMode, mode : Mode) : RawTap = {
     mode match {
-      case Local() => new FileTap(localScheme, localPath, readWriteMode(m))
-      case Test(buffers) => new MemoryTap(localScheme, testBuffer(buffers, m))
-      case Hdfs(conf) => createHdfsTap(m, conf)
+      // TODO support strict in Local
+      case Local(_) => {
+        val sinkmode = readOrWrite match {
+          case Read() => SinkMode.KEEP
+          case Write() => SinkMode.REPLACE
+        }
+        new FileTap(localScheme, localPath, sinkmode)
+      }
+      case Test(buffers) => new MemoryTap(localScheme, testBuffer(buffers, readOrWrite))
+      case HadoopTest(conf, buffers) => readOrWrite match {
+        case Read() => createHadoopTestReadTap(buffers(this))
+        case Write() => createHadoopTestWriteTap
+      }
+      case hdfsMode @ Hdfs(_, _) => readOrWrite match {
+        case Read() => createHdfsReadTap(hdfsMode)
+        case Write() => createHdfsWriteTap(hdfsMode)
+      }
     }
   }
 
-  protected def createHdfsTap(m : AccessMode, conf : Configuration) : RawTap = {
-    val taps = hdfsPaths.
-                filter{ (m == Write()) || pathIsGood(_, conf) }.
-                map(new Hfs(hdfsScheme, _, readWriteMode(m)).asInstanceOf[RawTap])
+  protected def createHadoopTestReadTap(buffer : Iterable[Tuple]) :
+    Tap[HadoopFlowProcess, JobConf, RecordReader[_,_], _] = {
+    new MemorySourceTap(buffer.toList.asJava, hdfsScheme.getSourceFields())
+  }
 
-    m match {
-      case Read() => taps.size match {
-          case 0 => error("No existing paths found in " + hdfsPaths)
-          case 1 => taps.head
-          case _ => new MultiSourceTap(taps.toSeq : _*)
+  protected def hadoopTestPath = "/tmp/scalding/" + hdfsWritePath
+  protected def createHadoopTestWriteTap :
+    Tap[HadoopFlowProcess, JobConf, RecordReader[_,_], OutputCollector[_,_]] = {
+    new Hfs(hdfsScheme, hadoopTestPath, SinkMode.REPLACE)
+  }
+
+  def finalizeHadoopTestOutput(mode : Mode) {
+    mode match {
+      case HadoopTest(conf, buffers) => {
+        val fp = new HadoopFlowProcess(new JobConf(conf))
+        // We read the write tap in order to add its contents in the test buffers
+        val it = createHadoopTestWriteTap.openForRead(fp)
+        val buf = buffers(this)
+        buf.clear()
+        while(it != null && it.hasNext) {
+          buf += new Tuple(it.next.getTuple)
         }
-      case Write() => taps.head
+        new File(hadoopTestPath).delete()
+      }
+      case _ => throw new RuntimeException("Cannot read test data in a non-test mode")
     }
+  }
+
+  // This is only called when Mode.sourceStrictness is true
+  protected def hdfsReadPathsAreGood(conf : Configuration) = {
+    hdfsPaths.forall { pathIsGood(_, conf) }
+  }
+
+  /*
+   * This throws InvalidSourceException if:
+   * 1) we are in sourceStrictness mode and all sources are not present.
+   * 2) we are not in the above, but some source has no input whatsoever
+   * TODO this only does something for HDFS now. Maybe we should do the same for LocalMode
+   */
+  def validateTaps(mode : Mode) : Unit = {
+    mode match {
+      case Hdfs(strict, conf) => {
+        if (strict && (!hdfsReadPathsAreGood(conf))) {
+          throw new InvalidSourceException("[" + this.toString + "] No good paths in: " + hdfsPaths.toString)
+        }
+        else if (!hdfsPaths.exists { pathIsGood(_, conf) }) {
+          //Check that there is at least one good path:
+          throw new InvalidSourceException("[" + this.toString + "] No good paths in: " + hdfsPaths.toString)
+        }
+      }
+      case _ => ()
+    }
+  }
+
+  protected def createHdfsReadTap(hdfsMode : Hdfs) :
+    Tap[HadoopFlowProcess, JobConf, RecordReader[_,_], _] = {
+    val goodPaths = if (hdfsMode.sourceStrictness) {
+      //we check later that all the paths are good
+      hdfsPaths
+    }
+    else {
+      // If there are no matching paths, this is still an error, we need at least something:
+      hdfsPaths.filter{ pathIsGood(_, hdfsMode.config) }
+    }
+    val taps = goodPaths.map { new Hfs(hdfsScheme, _, SinkMode.KEEP) }
+    taps.size match {
+      case 0 => {
+        // This case is going to result in an error, but we don't want to throw until
+        // validateTaps, so we just put a dummy path to return something so the
+        // Job constructor does not fail.
+        new Hfs(hdfsScheme, hdfsPaths.head, SinkMode.KEEP)
+      }
+      case 1 => taps.head
+      case _ => new MultiSourceTap[Hfs, HadoopFlowProcess, JobConf, RecordReader[_,_]]( taps.toSeq : _*)
+    }
+  }
+  protected def createHdfsWriteTap(hdfsMode : Hdfs) :
+    Tap[HadoopFlowProcess, JobConf, _, OutputCollector[_,_]] = {
+    new Hfs(hdfsScheme, hdfsWritePath, SinkMode.REPLACE)
   }
 
   /**
@@ -154,7 +237,8 @@ abstract class Source extends java.io.Serializable {
   */
   def readAtSubmitter[T](implicit mode : Mode, conv : TupleConverter[T]) : Stream[T] = {
     val tupleEntryIterator = mode match {
-      case Local() => {
+      case Local(_) => {
+        // TODO support strict here
         val fp = new LocalFlowProcess()
         val tap = new FileTap(localScheme, localPath, SinkMode.KEEP)
         tap.openForRead(fp)
@@ -164,13 +248,14 @@ abstract class Source extends java.io.Serializable {
         val tap = new MemoryTap(localScheme, testBuffer(buffers, Read()))
         tap.openForRead(fp)
       }
-      case Hdfs(conf) => {
+      case HadoopTest(conf, buffers) => {
         val fp = new HadoopFlowProcess(new JobConf(conf))
-        val taps = hdfsPaths.
-                filter{ pathIsGood(_, conf) }.
-                map(new Hfs(hdfsScheme, _, SinkMode.KEEP).asInstanceOf[RawTap])
-        val tap = new MultiSourceTap[HadoopFlowProcess,
-          JobConf, RecordReader[_,_], OutputCollector[_,_]](taps.toSeq : _*)
+        val tap = createHadoopTestReadTap(buffers(this))
+        tap.openForRead(fp)
+      }
+      case hdfsMode @ Hdfs(_, conf) => {
+        val fp = new HadoopFlowProcess(new JobConf(conf))
+        val tap = createHdfsReadTap(hdfsMode)
         tap.openForRead(fp)
       }
     }
@@ -276,26 +361,49 @@ case class Osv(p : String, f : Fields = Fields.ALL) extends FixedPathSource(p)
 
 object TimePathedSource {
   val YEAR_MONTH_DAY = "/%1$tY/%1$tm/%1$td"
-  val YEAR_MONTH_DAY_HOUR = YEAR_MONTH_DAY + "/%1$tH"
+  val YEAR_MONTH_DAY_HOUR = "/%1$tY/%1$tm/%1$td/%1$tH"
 }
-abstract class TimePathedSource(pattern : String, dateRange : DateRange, duration : Duration, tz : TimeZone) extends Source {
-  def hdfsPaths = {
-    dateRange.each(duration)(tz)
-      .map { (dr : DateRange) => String.format(pattern, dr.start.toCalendar(tz)) }
+
+/**
+ * This will automatically produce a globbed version of the given path.
+ * THIS MEANS YOU MUST END WITH A / followed by * to match a file
+ * For writing, we write to the directory specified by the END time.
+ */
+abstract class TimePathedSource(pattern : String, dateRange : DateRange, tz : TimeZone) extends Source {
+  val glober = Globifier(pattern)(tz)
+  override def hdfsPaths = glober.globify(dateRange)
+  //Write to the path defined by the end time:
+  override def hdfsWritePath = {
+    val lastSlashPos = pattern.lastIndexOf('/')
+    assert(lastSlashPos >= 0, "/ not found in: " + pattern)
+    val stripped = pattern.slice(0,lastSlashPos)
+    String.format(stripped, dateRange.end.toCalendar(tz))
   }
+  override def localPath = pattern
 
-  def localPath = pattern
-}
-
-abstract class CalendarPathedSource(pattern : String, dateRange : DateRange, duration : CalendarDuration, tz : TimeZone) extends Source {
-  def hdfsPaths = {
-    dateRange.each(duration)(tz)
-      .map { (dr : DateRange) => String.format(pattern, dr.start.toCalendar(tz)) }
+  // Override because we want to check UNGLOBIFIED paths that each are present.
+  override def hdfsReadPathsAreGood(conf : Configuration) : Boolean = {
+    List("%1$tH" -> Hours(1), "%1$td" -> Days(1)(tz),
+      "%1$tm" -> Months(1)(tz), "%1$tY" -> Years(1)(tz))
+      .find { unitDur : (String,Duration) => pattern.contains(unitDur._1) }
+      .map { unitDur =>
+        // This method is exhaustive, but too expensive for Cascading's JobConf writing.
+        dateRange.each(unitDur._2)
+          .map { dr : DateRange =>
+            val path = String.format(pattern, dr.start.toCalendar(tz))
+            val good = pathIsGood(path, conf)
+            if (!good) {
+              System.err.println("[ERROR] Path: " + path + " is missing in: " + toString)
+            }
+            //return
+            good
+          }
+          //All should be true
+          .forall { x => x }
+      }
+      .getOrElse(false)
   }
-
-  def localPath = pattern
 }
-
 
 case class TextLine(p : String) extends FixedPathSource(p) with TextLineScheme
 
