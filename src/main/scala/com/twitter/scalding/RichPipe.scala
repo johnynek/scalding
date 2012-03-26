@@ -255,7 +255,7 @@ class RichPipe(val pipe : Pipe) extends java.io.Serializable with JoinAlgorithms
     *
     * will unpack 'field1 into 'field2 and 'field3
     */
-  def unpack[T](fs : (Fields, Fields))(implicit unpacker : TupleUnpacker[T]) : Pipe = {
+  def unpack[T](fs : (Fields, Fields))(implicit unpacker : TupleUnpacker[T], mf : Manifest[T]) : Pipe = {
     val (fromFields, toFields) = fs
     assert(fromFields.size == 1, "Can only take 1 input field in unpack")
     val setter = unpacker.newSetter(toFields)

@@ -177,7 +177,8 @@ class GroupBuilder(val groupFields : Fields) extends FieldConversions
    * Note that the order of the tuples is not preserved: EVEN IF YOU GroupBuilder.sortBy!
    * If you need ordering use sortedTake or sortBy + scanLeft
    */
-  def toList[T](fieldDef : (Fields, Fields))(implicit conv : TupleConverter[T]) : GroupBuilder = {
+  def toList[T](fieldDef : (Fields, Fields))
+    (implicit conv : TupleConverter[T], mf : Manifest[T]) : GroupBuilder = {
     val (fromFields, toFields) = fieldDef
     conv.assertArityMatches(fromFields)
     val out_arity = toFields.size
@@ -497,7 +498,8 @@ class GroupBuilder(val groupFields : Fields) extends FieldConversions
   // example:
   // sortWithTake( ('clicks, 'tweet) -> 'topClicks, 5) { fn : (t0 :(Long,Long), t1:(Long,Long) => t0._1 < t1._1 }
   // topClicks will be a List[(Long,Long)]
-  def sortWithTake[T:TupleConverter](f : (Fields, Fields), k : Int)(lt : (T,T) => Boolean) : GroupBuilder = {
+  def sortWithTake[T](f : (Fields, Fields), k : Int)(lt : (T,T) => Boolean)
+    (implicit conv : TupleConverter[T], mf : Manifest[T]) : GroupBuilder = {
     assert(f._2.size == 1, "output field size must be 1")
     mapReduceMap(f) /* map1 */ { (tup : T) => List(tup) }
     /* reduce */ { (l1 : List[T], l2 : List[T]) =>
@@ -509,13 +511,13 @@ class GroupBuilder(val groupFields : Fields) extends FieldConversions
 
   // Reverse of above when the implicit ordering makes sense.
   def sortedReverseTake[T](f : (Fields, Fields), k : Int)
-    (implicit conv : TupleConverter[T], ord : Ordering[T]) : GroupBuilder = {
+    (implicit conv : TupleConverter[T], ord : Ordering[T], mf : Manifest[T]) : GroupBuilder = {
     sortWithTake(f,k) { (t0:T,t1:T) => ord.gt(t0,t1) }
   }
 
   // Same as above but useful when the implicit ordering makes sense.
   def sortedTake[T](f : (Fields, Fields), k : Int)
-    (implicit conv : TupleConverter[T], ord : Ordering[T]) : GroupBuilder = {
+    (implicit conv : TupleConverter[T], ord : Ordering[T], mf : Manifest[T]) : GroupBuilder = {
     sortWithTake(f,k) { (t0:T,t1:T) => ord.lt(t0,t1) }
   }
 }

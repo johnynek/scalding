@@ -65,34 +65,42 @@ trait TupleConversions extends GeneratedConversions {
 
   implicit object UnitGetter extends TupleGetter[Unit] {
     override def get(tup : CTuple, i : Int) = ()
+    override def classOfItem = classOf[Unit]
   }
 
   implicit object BooleanGetter extends TupleGetter[Boolean] {
     override def get(tup : CTuple, i : Int) = tup.getBoolean(i)
+    override def classOfItem = classOf[Boolean]
   }
 
   implicit object ShortGetter extends TupleGetter[Short] {
     override def get(tup : CTuple, i : Int) = tup.getShort(i)
+    override def classOfItem = classOf[Short]
   }
 
   implicit object IntGetter extends TupleGetter[Int] {
     override def get(tup : CTuple, i : Int) = tup.getInteger(i)
+    override def classOfItem = classOf[Int]
   }
 
   implicit object LongGetter extends TupleGetter[Long] {
     override def get(tup : CTuple, i : Int) = tup.getLong(i)
+    override def classOfItem = classOf[Long]
   }
 
   implicit object FloatGetter extends TupleGetter[Float] {
     override def get(tup : CTuple, i : Int) = tup.getFloat(i)
+    override def classOfItem = classOf[Float]
   }
 
   implicit object DoubleGetter extends TupleGetter[Double] {
     override def get(tup : CTuple, i : Int) = tup.getDouble(i)
+    override def classOfItem = classOf[Double]
   }
 
   implicit object StringGetter extends TupleGetter[String] {
     override def get(tup : CTuple, i : Int) = tup.getString(i)
+    override def classOfItem = classOf[java.lang.String]
   }
 
   //This is here for handling functions that return cascading tuples:

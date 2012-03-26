@@ -21,6 +21,7 @@ import cascading.tuple.TupleEntry
 
 abstract class TupleGetter[T] extends java.io.Serializable {
   def get(tup : Tuple, i : Int) : T
+  def classOfItem : Class[T]
 }
 
 /**
@@ -60,8 +61,9 @@ abstract class TupleConverter[T] extends java.io.Serializable with TupleArity {
 }
 
 trait LowPriorityConversions {
-  implicit def defaultTupleGetter[T] = new TupleGetter[T] {
+  implicit def defaultTupleGetter[T](implicit mf : Manifest[T]) = new TupleGetter[T] {
     def get(tup : Tuple, i : Int) = tup.getObject(i).asInstanceOf[T]
+    def classOfItem : Class[T] = mf.erasure.asInstanceOf[Class[T]]
   }
 
   def productToTuple(in : Product) : Tuple = {
