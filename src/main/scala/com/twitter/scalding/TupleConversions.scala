@@ -16,21 +16,35 @@ limitations under the License.
 package com.twitter.scalding
 
 import cascading.tuple.TupleEntry
+import cascading.tuple.TupleEntryIterator
 import cascading.tuple.{Tuple => CTuple}
 
 trait TupleConversions extends GeneratedConversions {
-  def convertMapFn[A,B](fn : A => B)(implicit conv : TupleConverter[A]) = {
-    (t : TupleEntry) => fn(conv.get(t))
+
+  // Convert a TupleEntry to a List of CTuple, of length 2, with key, value
+ // from the TupleEntry (useful for RichPipe.unpivot)
+  def toKeyValueList(tupe : TupleEntry) : List[CTuple] = {
+    val keys = tupe.getFields
+    (0 until keys.size).map { idx =>
+      new CTuple(keys.get(idx), tupe.get(idx))
+    }.toList
   }
 
-  def convertFoldFn[A,B](fn : (A,B) => A)(implicit conv : TupleConverter[B]) = {
-    (acc : A, t : TupleEntry) => fn(acc, conv.get(t))
+  // Convert a Cascading TupleEntryIterator into a Stream of a given type
+  def toStream[T](it : TupleEntryIterator)(implicit conv : TupleConverter[T]) : Stream[T] = {
+    if(null != it && it.hasNext) {
+      val next = conv(it.next)
+      // Note that Stream is lazy in the second parameter, so this doesn't blow up the stack
+      Stream.cons(next, toStream(it)(conv))
+    }
+    else {
+      Stream.Empty
+    }
   }
 
   implicit object TupleEntryConverter extends TupleConverter[TupleEntry] {
-    override def get(tup : TupleEntry) = tup
-    def apply(tup : CTuple) = error("Unimplemented to convert Tuple back to TupleEntry")
-    def arity = -1
+    override def apply(tup : TupleEntry) = tup
+    override def arity = -1
   }
 
   implicit def iterableToIterable [A] (iterable : java.lang.Iterable[A]) : Iterable[A] = {
@@ -95,7 +109,7 @@ trait TupleConversions extends GeneratedConversions {
   }
 
   implicit object UnitConverter extends TupleConverter[Unit] {
-    override def apply(arg : CTuple) = ()
+    override def apply(arg : TupleEntry) = ()
     override def arity = 0
   }
 }

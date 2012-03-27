@@ -2,7 +2,7 @@
 require 'fileutils'
 require 'thread'
 
-SCALDING_VERSION="0.3.5"
+SCALDING_VERSION="0.4.1"
 
 #Usage : scald.rb [--hdfs|--local|--print] job <job args>
 # --hdfs: if job ends in ".scala" or ".java" and the file exists, link it against JARFILE (below) and then run it on HOST.
@@ -24,7 +24,8 @@ TMPDIR="/tmp"
 BUILDDIR=TMPDIR+"/script-build"
 LOCALMEM="3g" #how much memory for java to use when running in local mode
 #replace COMPILE_CMD="scalac" if you want to run with your systems default scala compiler
-COMPILE_CMD="java -cp project/boot/scala-2.8.1/lib/scala-library.jar:project/boot/scala-2.8.1/lib/scala-compiler.jar -Dscala.home=project/boot/scala-2.8.1/lib/ scala.tools.nsc.Main"
+SBT_HOME="#{ENV['HOME']}/.sbt"
+COMPILE_CMD="java -cp #{SBT_HOME}/boot/scala-2.8.1/lib/scala-library.jar:#{SBT_HOME}/boot/scala-2.8.1/lib/scala-compiler.jar -Dscala.home=#{SBT_HOME}/boot/scala-2.8.1/lib/ scala.tools.nsc.Main"
 ##############################################################
 
 if ARGV.size < 1
@@ -47,6 +48,13 @@ MODE = case ARGV[0]
 end
 
 JOBFILE=ARGV.shift
+
+# check if running on windows platform
+def Kernel.is_windows?
+  processor, platform, *rest = RUBY_PLATFORM.split("-")
+  platform == 'mswin32' or platform == 'mingw32'
+end
+IS_WINDOWS=Kernel.is_windows? == true
 
 def file_type
   JOBFILE =~ /\.(scala|java)$/
@@ -188,7 +196,11 @@ SHELL_COMMAND = case MODE
     end
   when "--local"
     if is_file?
-      "java -Xmx#{LOCALMEM} -cp #{JARPATH}:#{JOBJARPATH} com.twitter.scalding.Tool #{JOB} --local " + ARGV.join(" ")
+      if (IS_WINDOWS)
+  		  "java -Xmx#{LOCALMEM} -cp #{JARPATH};#{JOBJARPATH} com.twitter.scalding.Tool #{JOB} --local " + ARGV.join(" ")
+		  else
+			  "java -Xmx#{LOCALMEM} -cp #{JARPATH}:#{JOBJARPATH} com.twitter.scalding.Tool #{JOB} --local " + ARGV.join(" ")
+		  end
     else
       "java -Xmx#{LOCALMEM} -cp #{JARPATH} com.twitter.scalding.Tool #{JOB} --local " + ARGV.join(" ")
     end
